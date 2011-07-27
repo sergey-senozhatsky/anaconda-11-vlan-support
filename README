@@ -1,0 +1,87 @@
+GPLv2
+Sergey Senozhatsky <sergey.senozhatsky at gmail dot com>, 2011
+
+
+Problem of missing VLAN support for anaconda stage1 installer has been
+around for quite some time already.
+
+---
+Anaconda mailing list (Aug 2010) proposes the following solution
+Angus Clarke wrote:
+"I ask our network guys to assign a default VLAN to switch ports.
+I don't know the correct networking terminology, so I will describe 
+the process
+
+Server boots to perform kickstart
+sends DHCP query (no VLAN tag)
+Switch notices untagged packets and assigns them to "default" VLAN
+
+I use this "default" VLAN specifically for building servers, and use 
+it across multiple target networks.
+Final network configuration (derived from kickstart template) can be 
+whatever you want (e.g. include VLAN tag info for other networks)"
+
+http://www.mail-archive.com/kickstart-list@redhat.com/msg00317.html
+
+In RH's bugzilla VLAN support present since 2010-08-17 and marked 
+as FutureFeature/Enhancement Request: "add VLAN tagging to anaconda"
+https://bugzilla.redhat.com/show_bug.cgi?id=624752
+
+---
+
+
+
+This repository contains my own solution (patch) for the problem in question, 
+which worked in our environment, though never been tested elsewhere.
+
+
+
+=========================================================================
+VLAN support patch
+In order to enable VLAN tagging, please apply
+ anaconda-11-vlanid-v1.patch
+
+(skip this step if you cloned the whole repository -- patch is 
+already applied).
+
+=========================================================================
+USAGE EXAMPLE
+
+VLAN could be specified in several ways, for example, as a boot parameter
+
+	 linux ip=10.6.27.XX gateway=10.6.0.0 netmask=255.255.192.0 
+	 dns=10.6.27.XX vlanid=44 ks=http://10.6.27.XX/iso/anaconda-ks.cfg
+
+or via VLAN field in a stage1 UI.
+
+
+=========================================================================
+FIXES
+
+While working on this I've also fixed several anaconda bugs
+
+(some of them are)
+- endless loop on doDhcp error in configureTCPIP;
+- endless loop in kickstartNetworkUp;
+- workaround for "pumpSetupInterface error: Operation not permitted" with 
+  the gateway parameter specified.
+
+
+=========================================================================
+NOTE
+
+PLEASE NOTE, since I don't have any hardware for testing anymore, it's
+quite possible that I will not be able to provide any assistance or help 
+in case of any problems on your side.
+
+
+The code doesn't follow anaconda's original codestyles (whitespaces,
+javaLikeFunctionNames, etc.), so it hasn't been pushed to RH/anaconda team.
+
+
+Only source code and patch are provided, no spec files or any 3-rd party
+patches (CentOS, Fedora, RH, etc.) attached. Please apply them on your own.
+
+
+Sergey
+
