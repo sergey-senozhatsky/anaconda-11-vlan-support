@@ -41,8 +41,6 @@ VLAN support patch
 In order to enable VLAN tagging, please apply
  anaconda-11-vlanid-v1.patch
 
-(skip this step if you cloned the whole repository -- patch is 
-already applied).
 
 =========================================================================
 USAGE EXAMPLE
