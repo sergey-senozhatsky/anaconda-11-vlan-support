@@ -1,0 +1,853 @@
+diff --git a/loader2/loader.c b/loader2/loader.c
+index ae8b91a..3056bae 100644
+--- a/loader2/loader.c
++++ b/loader2/loader.c
+@@ -491,6 +491,9 @@ static void readNetInfo(struct loaderData_s ** ld) {
+             if (!strncmp(vname, "GATEWAY", 7))
+                 loaderData->gateway = strdup(vparm);
+ 
++            if (!strncmp(vname, "VLANID", 6))
++                loaderData->vlanid = atoi(vparm);
++            
+             if (!strncmp(vname, "DNS", 3))
+                 loaderData->dns = strdup(vparm);
+ 
+@@ -789,6 +792,15 @@ static void parseCmdLineFlags(struct loaderData_s * loaderData,
+             parseCmdLineIp(loaderData, argv[i]);
+         else if (!strncasecmp(argv[i], "ipv6=", 5))
+             parseCmdLineIpv6(loaderData, argv[i]);
++
++		/*Parsing vlanid= flag
++		 */
++		else if (!strncasecmp(argv[i], "vlanid=", 7)) {
++            loaderData->vlanid = atoi(argv[i] + 7);
++			logMessage(INFO, "Found vlanid %d\n", loaderData->vlanid);
++			
++			flags |= LOADER_FLAGS_VLANID;
++		}
+         else if (!strncasecmp(argv[i], "netmask=", 8)) 
+             loaderData->netmask = strdup(argv[i] + 8);
+         else if (!strncasecmp(argv[i], "gateway=", 8))
+@@ -1223,6 +1235,10 @@ static char *doLoaderMain(char * location,
+             setupNetworkDeviceConfig(&netDev, loaderData);
+ 
+             rc = readNetConfig(devName, &netDev, loaderData->netCls, methodNum, query);
++
++            loaderData->vlaninfo_set = netDev.vlaninfo_set;
++            loaderData->vlanid = netDev.vlanid;
++            
+             if ((rc == LOADER_NOOP) && (netDev.preset == 0)) {
+                 loaderData->ipinfo_set = 0;
+                 loaderData->ipv6info_set = 0;
+@@ -1232,9 +1248,20 @@ static char *doLoaderMain(char * location,
+                 ((dir == -1) && (rc == LOADER_NOOP))) {
+                 step = STEP_IFACE;
+                 dir = -1;
++
++                down_vlan(&netDev);
++                loaderData->vlaninfo_set = 0;
++                netDev.vlaninfo_set = 0;
++                
+                 break;
+             }
+ 
++            if (loaderData->vlanid > 0 && loaderData->vlaninfo_set == 0) {
++                load_vlan_module(loaderData);
++                up_vlan(&netDev);
++                loaderData->vlaninfo_set = netDev.vlaninfo_set;
++            }
++            
+             writeNetInfo("/tmp/netinfo", &netDev);
+             step = STEP_URL;
+             dir = 1;
+@@ -1254,7 +1281,9 @@ static char *doLoaderMain(char * location,
+                                       location, loaderData, modInfo, modLoaded, 
+                                       modDepsPtr);
+             if (!url) {
+-                step = STEP_IP ;
++                down_vlan(&netDev);
++                
++                step = STEP_IP;
+                 dir = -1;
+             } else {
+                 logMessage(INFO, "got url %s", url);
+@@ -1419,6 +1448,18 @@ static int anaconda_trace_init(void) {
+     return 0;
+ }
+ 
++/*up_vlan may be called from different paths,
++ *in some cases we may call up_vlan with no module
++ *loaded (prefer to call LoadModule in loader)
++ */
++void load_vlan_module(struct loaderData_s *loaderData) {
++    logMessage(INFO, "going to load 802.1q");
++    /*hack*/
++    mlLoadModuleSet("8021q", loaderData->modLoaded,
++                    *loaderData->modDepsPtr,
++                    loaderData->modInfo);
++}
++
+ int main(int argc, char ** argv) {
+     /* Very first thing, set up tracebacks and debug features. */
+     int rc;
+@@ -1556,7 +1597,9 @@ int main(int argc, char ** argv) {
+     loaderData.fw_loader_pid = -1;
+     loaderData.fw_search_pathz_len = -1;
+     loaderData.dhcpTimeout = -1;
+-
++	loaderData.vlanid = -1;
++    loaderData.vlaninfo_set = 0;
++	
+     extraArgs[0] = NULL;
+     parseCmdLineFlags(&loaderData, cmdLine);
+ 
+@@ -1687,7 +1730,17 @@ int main(int argc, char ** argv) {
+     } else {
+         busProbe(modInfo, modLoaded, modDeps, 0);
+     }
+-
++		   
++		   /*
++			*At this point we have network modules loaded
++			*(I hope so).
++			*Force 8021q loading, since user requested vlanid
++			*/
++		   if (FL_VLANID(flags)) {
++               /*hack*/
++               load_vlan_module(&loaderData);
++		   }
++    
+     /*
+      * BUG#514971: If the mlx4_core is loaded load the mlx4_en too, since we do not use the modprobe rules
+      */
+diff --git a/loader2/loader.h b/loader2/loader.h
+index cff59b7..a246060 100644
+--- a/loader2/loader.h
++++ b/loader2/loader.h
+@@ -48,7 +48,9 @@
+ #define LOADER_FLAGS_IS_KICKSTART       (((uint64_t) 1) << 35)
+ #define LOADER_FLAGS_HAVE_CMSCONF       (((uint64_t) 1) << 36)
+ #define LOADER_FLAGS_AUTOMODDISK        (((uint64_t) 1) << 37)
+ #define LOADER_FLAGS_NOEJECT            (((uint64_t) 1) << 38)
++#define LOADER_FLAGS_VLANID             (((uint64_t) 1) << 39)
++
+ 
+ #define FL_TESTING(a)            ((a) & LOADER_FLAGS_TESTING)
+ #define FL_EXPERT(a)             ((a) & LOADER_FLAGS_EXPERT)
+@@ -86,6 +88,7 @@
+ #define FL_UB(a)                 ((a) & LOADER_FLAGS_UB)
+ #define FL_NOIPV4(a)             ((a) & LOADER_FLAGS_NOIPV4)
+ #define FL_NOIPV6(a)             ((a) & LOADER_FLAGS_NOIPV6)
++#define FL_VLANID(a)             ((a) & LOADER_FLAGS_VLANID)
+ #define FL_IP_PARAM(a)           ((a) & LOADER_FLAGS_IP_PARAM)
+ #define FL_IPV6_PARAM(a)         ((a) & LOADER_FLAGS_IPV6_PARAM)
+ #define FL_IS_KICKSTART(a)       ((a) & LOADER_FLAGS_IS_KICKSTART)
+@@ -117,8 +120,10 @@ struct loaderData_s {
+     int mtu;
+     int noDns;
+     int dhcpTimeout;
++	int vlanid;
+     int ipinfo_set;
+     int ipv6info_set;
++    int vlaninfo_set;
+     char * ksFile;
+     int method;
+     char * ddsrc;
+@@ -151,4 +156,6 @@ struct loaderData_s {
+ #define LIBPATH "/lib:/usr/lib:/usr/X11R6/lib:/usr/kerberos/lib:/mnt/usr/lib:/mnt/sysimage/lib:/mnt/sysimage/usr/lib"
+ #endif
+ 
++void load_vlan_module(struct loaderData_s *loaderData);
++
+ #endif
+diff --git a/loader2/net.c b/loader2/net.c
+index 61b6796..3104457 100644
+--- a/loader2/net.c
++++ b/loader2/net.c
+@@ -32,6 +32,7 @@
+ #include <popt.h>
+ #include <resolv.h>
+ #include <net/if.h>
++#include <net/route.h>
+ #include <newt.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -42,6 +43,10 @@
+ #include <netlink/netlink.h>
+ #include <netlink/route/addr.h>
+ #include <netlink/route/link.h>
++#include <linux/if_vlan.h>
++#include <linux/sockios.h>
++#include <unistd.h>
++#include <fcntl.h>
+ 
+ #include "../isys/dns.h"
+ #include "../isys/isys.h"
+@@ -370,6 +375,9 @@ void printLoaderDataIPINFO(struct loaderData_s *loaderData) {
+     logMessage(DEBUGLVL, "loaderData->ipv6info_set = |%d|", loaderData->ipv6info_set);
+     logMessage(DEBUGLVL, "loaderData->ipv6         = |%s|", loaderData->ipv6);
+     logMessage(DEBUGLVL, "loaderData->dhcpTimeout  = |%d|", loaderData->dhcpTimeout);
++    logMessage(DEBUGLVL, "loaderData->vlanid       = |%d|", loaderData->vlanid);
++    logMessage(DEBUGLVL, "loaderData->vlaninfo_set = |%d|", loaderData->vlaninfo_set);
++
+     logMessage(DEBUGLVL, "loaderData->netmask      = |%s|", loaderData->netmask);
+     logMessage(DEBUGLVL, "loaderData->gateway      = |%s|", loaderData->gateway);
+     logMessage(DEBUGLVL, "loaderData->dns          = |%s|", loaderData->dns);
+@@ -382,6 +390,307 @@ void printLoaderDataIPINFO(struct loaderData_s *loaderData) {
+ }
+ 
+ 
++static int get_socket() {
++    int sock;
++	
++    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
++        fprintf(stderr, "Error creating socket: %s\n", strerror(errno));
++		logMessage(ERROR, "Error creating socket: %s\n", strerror(errno));
++        return -1;
++    }
++	
++    return sock;
++}
++
++static void error_on_screen(char *caption, char *msg) {
++    startNewt();
++    newtWinMessage(caption, _("OK"), msg);
++}
++
++/*Add VLAN id to device if_name
++ *
++ */
++int dev_vid_ioctl(int sock, int flag, char * ifname, int vlanid) {
++	struct vlan_ioctl_args if_request;
++
++	logMessage(INFO, "Attemptimg to '%s' vlanid %d on dev %s",
++               (flag == DEL_VLAN_CMD?"del":"add"),
++               vlanid, ifname);
++	
++	/*Check whether 8021q presents
++	 *
++	 */
++	int fd = open("/proc/net/vlan/config", O_RDONLY);
++	if (fd < 0) {
++		logMessage(ERROR, "failed open vlan config: %s", strerror(errno));
++		error_on_screen(_("VLAN id error"), _("Can't open vlan config (check whether 802.1q is loaded)"));
++		return -1;
++	}
++	close(fd);
++
++    if (flag == ADD_VLAN_CMD) {
++        char path[128];
++        /*Check if requested VLAN is already configured
++         */
++        snprintf(path, 128, "/proc/net/vlan/%s.%d", ifname, vlanid);
++        fd = open(path, O_RDONLY);
++        if (fd > 0) {
++            logMessage(INFO, "vlan already set %s.%d", ifname, vlanid);
++            close(fd);
++            return 0;
++        }
++    }
++   
++	memset(&if_request, 0x00, sizeof(struct vlan_ioctl_args));
++    
++    if (flag == DEL_VLAN_CMD)
++        snprintf(if_request.device1, IFNAMSIZ, "%s.%d", ifname, vlanid);
++    else
++        strncpy(if_request.device1, ifname, IFNAMSIZ);
++    
++	if_request.u.VID = vlanid;
++    if_request.cmd = flag;
++    
++    /*add vlan*/
++	int rc = ioctl(sock, SIOCSIFVLAN, &if_request);
++
++	if (rc < 0 && errno != EEXIST) {
++		logMessage(ERROR, "vlanid failed [%d:%d]: %s", rc, errno,
++                   strerror(errno));	   
++		error_on_screen(_("VLAN id error"),
++                        _("VLAN configuration error (ioctl)"));
++		return -1;
++	} else {
++        logMessage(INFO, "vlanid '%s' %d on dev %s",
++                   (flag == DEL_VLAN_CMD?"del":"add"),
++                   vlanid, ifname);
++    }
++    
++	return rc;
++}
++
++
++/*
++ *Add gateway on device
++ *(addr_t supposed to be known at this point,
++ *since non-vlan device is already configured)
++ */
++int dev_addgateway_ioctl(int sock, int flag,
++                         const char *if_name,
++                         ip_addr_t *addr_dst,
++                         ip_addr_t *addr_gmask) {
++    int rc;
++    struct sockaddr_in *addr = NULL;
++    struct rtentry route;
++    char *buf = NULL;
++    
++    logMessage(INFO, "Attempting to configure gw %s on %s",
++               ip_text(*addr_dst, buf, 0), if_name);
++    logMessage(INFO, "Genmask %s", ip_text(*addr_gmask, buf, 0));
++
++    
++    memset(&route, 0, sizeof(route));
++    /*sockaddr to sockaddr_in*/
++    addr = (struct sockaddr_in*) &route.rt_gateway;
++    addr->sin_family = AF_INET;
++    addr->sin_addr.s_addr = 0;
++    addr->sin_port = 0;
++    
++    /*sockaddr to sockaddr_in*/
++    addr = (struct sockaddr_in*) &route.rt_dst;
++    addr->sin_family = AF_INET;
++    addr->sin_addr = ip_in_addr(addr_dst);
++    addr->sin_port = 0;
++    
++    /*sockaddr to sockaddr_in*/
++    addr = (struct sockaddr_in*) &route.rt_genmask;
++    addr->sin_family = AF_INET;
++    if (addr_gmask->sa_family)
++        addr->sin_addr = ip_in_addr(addr_gmask);
++    else {
++        addr->sin_addr.s_addr = inet_addr("255.255.255.0");
++        logMessage(INFO, "Genmask set to 255.255.255.0");
++    }
++    addr->sin_port = 0;
++    
++    /*force device*/
++    route.rt_dev = strdup(if_name);
++    route.rt_flags = RTF_UP; //RTF_UP | RTF_GATEWAY;
++    route.rt_metric = 0;
++    
++    rc = ioctl(sock, flag, &route);
++
++    free(route.rt_dev);
++    
++    if (rc != 0) {
++        logMessage(ERROR, "failed to add gateway %s on %s [%d]",
++                   strerror(errno), if_name, errno);
++    }
++    
++    return rc;
++}
++
++/*This looks ugly. The problem is that calling pumpSetupInterface
++ *will fail with "add route Operation not permitted" when called
++ *with gateway. libdhcp just not working.
++ */
++int wrapperPumpSetupInterface(struct pumpNetIntf *dev, int sock) {
++    int rc = 0;
++    char *ret = NULL;
++    int has_gateway = 0;
++
++    ip_addr_t gw, nm;
++
++    debugPumpIntfInfo(dev);
++    
++    ret = pumpEnableInterface(dev->device);
++    if (ret != 0) {
++        logMessage(ERROR, "Can't enable dev %s", ret);
++        rc = -1;
++    }
++    
++    /*Some interfaces are adding route while configuring.
++     *That will cause libdhcp error. That's why we'll try
++     *to add route 'manually' later.
++     */
++    if (dev->set & PUMP_NETINFO_HAS_GATEWAY) {
++        logMessage(INFO, "Device HAS_GATEWAY. Workaround step1");
++        
++        memcpy(&gw, &dev->gateway, sizeof(ip_addr_t));
++        memcpy(&nm, &dev->netmask, sizeof(ip_addr_t));
++        
++        /*Some version of libdhcp are checking PUMP_NETINFO_HAS_GATEWAY
++         *flag, some are checking 'if (dev->gateway.sa_family)' to
++         *determine whether route configuration is necessary.
++         */
++        has_gateway = dev->gateway.sa_family;
++        dev->gateway.sa_family = 0;
++        dev->set &= ~PUMP_NETINFO_HAS_GATEWAY;
++    }
++    
++    /*call this dumb libdhcp*/
++    ret = pumpSetupInterface(dev);
++    if (ret != NULL) {
++        logMessage(INFO, "result of pumpSetupInterface is %s", ret);
++        rc = -1;
++    }
++    
++    waitForLink((char *)dev->device);
++    
++    if (has_gateway) {
++        logMessage(INFO, "Device HAS_GATEWAY. Workaround step2");
++        
++        /*roll-back everything*/
++        dev->gateway.sa_family = has_gateway;
++        dev->set |= PUMP_NETINFO_HAS_GATEWAY;
++        memcpy(&dev->gateway, &gw, sizeof(ip_addr_t));
++        memcpy(&dev->netmask, &nm, sizeof(ip_addr_t));
++        
++        if (sock == 0) {
++            sock = get_socket();
++        }
++        
++        /*Try to add route manually.
++         */
++        if (rc == 0)
++            rc = dev_addgateway_ioctl(sock, SIOCADDRT,
++                                      dev->device,
++                                      &gw,
++                                      &nm);
++        close(sock);
++        
++        if (rc != 0) {
++            logMessage(ERROR, "Can't add route for device %s",
++                       dev->device);
++            }
++    }
++
++    ret = pumpEnableInterface(dev->device);
++    if (ret != 0) {
++        logMessage(ERROR, "Can't enable dev %s", ret);
++        rc = -1;
++    }
++    
++    return rc;
++}
++
++
++/*Down vlan on current device
++ */
++int down_vlan(struct networkDeviceConfig *netDev) {
++    int rc = 0;
++    
++    if (netDev->vlanid > 0 && netDev->vlaninfo_set == 1) {
++        /*We're not removing vlan via ioctl. Otherwise we'll
++         *have pumpSetupInterface error: getlink error.
++         */
++
++        char ifname[IF_NAMESIZE];
++        snprintf(ifname, IF_NAMESIZE, "%s.%d", netDev->dev.device,
++                netDev->vlanid);
++
++        logMessage(INFO, "Disabling %s", ifname);
++        
++        clearInterface(ifname);
++        char *ret = pumpDisableInterface(ifname);
++        if (ret != NULL) {
++            logMessage(ERROR, "Can't disable interface %s: %s", ifname, ret);
++            rc = -1;
++        }
++        
++        netDev->vlaninfo_set = 0;
++    }
++    
++    return rc;
++}
++
++
++
++/*Configure vlan on current device
++ */
++int up_vlan(struct networkDeviceConfig * netDev) {
++    int sock = 0, rc = -1;
++    char device[IF_NAMESIZE];
++    memset(&device, 0x00, IF_NAMESIZE);
++
++    sprintf(device, "%s.%d", netDev->dev.device, netDev->vlanid);
++    logMessage(INFO, "Going to configure dev %s", device);
++
++    netDev->vlaninfo_set = 0;
++    
++    sock = get_socket();
++    rc = dev_vid_ioctl(sock, ADD_VLAN_CMD, netDev->dev.device,
++                       netDev->vlanid);
++    if (rc != 0) {
++        logMessage(ERROR, "Can't configure VLAN (vlanid)");
++        dev_vid_ioctl(sock, DEL_VLAN_CMD, netDev->dev.device,
++                      netDev->vlanid);
++        close(sock);
++        return rc;
++    }
++    
++    struct pumpNetIntf vIntf;
++    memcpy(&vIntf, &netDev->dev, sizeof(struct pumpNetIntf));
++    strcpy(vIntf.device, device);
++    
++    rc = wrapperPumpSetupInterface(&vIntf, sock);
++    if (rc == 0) {
++        netDev->vlaninfo_set = 1;
++
++        logMessage(INFO, "Configuration done: ok");
++    } else {
++        dev_vid_ioctl(sock, DEL_VLAN_CMD, netDev->dev.device,
++                      netDev->vlanid);
++        logMessage(ERROR, "Configuration error");
++        error_on_screen(_("Error"), _("Can't configure vlan"));
++    }
++
++    close(sock);
++    
++    return rc;
++}
++
++
+ #ifndef MAX_DNS_SERVERS
+ #define MAX_DNS_SERVERS MAXNS
+ #endif
+@@ -604,6 +913,10 @@ void setupNetworkDeviceConfig(struct networkDeviceConfig * cfg,
+             cfg->dev.set |= PUMP_NETINFO_HAS_DNS;
+     }
+ 
++    if (loaderData->vlanid > 0) {			
++        cfg->vlanid = loaderData->vlanid;
++    }
++
+     if (loaderData->hostname) {
+         logMessage(INFO, "setting specified hostname of %s",
+                    loaderData->hostname);
+@@ -684,6 +997,7 @@ int readNetConfig(char * device, struct networkDeviceConfig * cfg,
+     strcpy(newCfg.dev.device, device);
+     newCfg.essid = NULL;
+     newCfg.wepkey = NULL;
++	newCfg.vlanid = cfg->vlanid;
+     newCfg.isDynamic = cfg->isDynamic;
+     newCfg.isiBFT = cfg->isiBFT;
+     newCfg.noDns = cfg->noDns;
+@@ -826,7 +1140,7 @@ int configureTCPIP(char * device, struct networkDeviceConfig * cfg,
+                    struct networkDeviceConfig * newCfg,
+                    struct netconfopts * opts, int methodNum,
+                    int query) {
+-    int i = 0, z = 0, skipForm = 0, dhcp_failed = 0;
++    int i = 0, z = 0, skipForm = 0, dhcp_failed = 0, tries = 0;
+     newtComponent f, okay, back, answer;
+     newtComponent ipv4Checkbox, ipv6Checkbox, v4Method[2], v6Method[3];
+     newtGrid grid, checkgrid, buttons;
+@@ -864,7 +1178,8 @@ int configureTCPIP(char * device, struct networkDeviceConfig * cfg,
+     buttons = newtButtonBar(_("OK"), &okay, _("Back"), &back, NULL);
+ 
+     /* checkgrid contains the toggle options for net configuration */
+-    checkgrid = newtCreateGrid(1, 8);
++    /* VLAN id */
++    checkgrid = newtCreateGrid(1, 10);
+ 
+     newtGridSetField(checkgrid, 0, 0, NEWT_GRID_COMPONENT, ipv4Checkbox,
+                      0, 0, 0, 0, NEWT_ANCHOR_LEFT, 0);
+@@ -878,6 +1193,19 @@ int configureTCPIP(char * device, struct networkDeviceConfig * cfg,
+         newtGridSetField(checkgrid, 0, i, NEWT_GRID_COMPONENT, v6Method[i-5],
+                          7, 0, 0, 0, NEWT_ANCHOR_LEFT, 0);
+ 
++    const char *vlan = NULL;
++    {
++        char initial_vlan[10];
++        sprintf(initial_vlan, "%d", cfg->vlanid);
++        newtGridSetField(checkgrid, 0, 8, NEWT_GRID_COMPONENT,
++                         newtLabel(-1, -1, _("VLAN id:")),
++                         0, 0, 0, 0, NEWT_ANCHOR_LEFT, 0);
++        newtGridSetField(checkgrid, 0, 9, NEWT_GRID_COMPONENT,
++                         newtEntry(-1, -1, (const char*)initial_vlan, 9, &vlan, 0),
++                         1, 0, 0, 0, NEWT_ANCHOR_LEFT, 0);
++        memset(initial_vlan, 0x00, 10);
++    }
++    
+     /* main window layout */
+     grid = newtCreateGrid(1, 2);
+     newtGridSetField(grid, 0, 0, NEWT_GRID_SUBGRID, checkgrid,
+@@ -936,6 +1264,21 @@ int configureTCPIP(char * device, struct networkDeviceConfig * cfg,
+ 
+     /* run the form */
+     do {
++        /*
++         *Cool. We may have endless loop here.
++         */
++        tries++;
++        if (tries > 2) {
++            logMessage(ERROR, "Can't configure network. Will show form.");
++            logMessage(ERROR, "Dropping LOADER_FLAGS_IS_KICKSTART flag.");
++            skipForm = 0;
++            tries = 0;
++            /*Otherwise we may have endless loop, when hitting
++             *back on manualNetConfig
++             */
++            flags &= ~LOADER_FLAGS_IS_KICKSTART;
++        }
++        
+         if (!skipForm) {
+             answer = newtRunForm(f);
+ 
+@@ -944,7 +1287,25 @@ int configureTCPIP(char * device, struct networkDeviceConfig * cfg,
+                 newtPopWindow();
+                 return LOADER_BACK;
+             }
+-
++            
++            if (*vlan) {
++                fprintf(stderr, "VLANID=%s\n", vlan);
++                int vlanid = atoi(vlan);
++                
++                if (cfg->vlanid != vlanid) {
++                    logMessage(INFO, "New vlanid. Dropping flag (rem old vlanid)");
++                    down_vlan(cfg);
++                    
++                    cfg->vlanid = vlanid;
++                    newCfg->vlanid = cfg->vlanid;
++                    cfg->vlaninfo_set = 0;
++                    newCfg->vlaninfo_set = 0;
++                }
++            } else {
++                cfg->vlanid = 0;
++                newCfg->vlanid = 0;
++            }
++            
+             /* need at least one stack */
+             if (opts->ipv4Choice == NEWT_CHECKBOXTREE_UNSELECTED &&
+                 opts->ipv6Choice == NEWT_CHECKBOXTREE_UNSELECTED) {
+@@ -1068,7 +1429,8 @@ int manualNetConfig(char * device, struct networkDeviceConfig * cfg,
+                   && newCfg->ipv6method == IPV6_MANUAL_METHOD;
+ 
+     /* UI WINDOW 2 (optional): manual IP config for non-DHCP installs */
+-    rows = 2;
++    /* UI WINDOW 3 - vlan id field*/
++    rows = 3;
+     for (i = 0; i < 2; i++)
+         if (stack[i]) rows++;
+     egrid = newtCreateGrid(4, rows);
+@@ -1181,6 +1543,19 @@ int manualNetConfig(char * device, struct networkDeviceConfig * cfg,
+     /* common entry items */
+     ipcomps->gwEntry = newtEntry(-1, -1, NULL, 41, &ipcomps->gw, 0);
+     ipcomps->nsEntry = newtEntry(-1, -1, NULL, 41, &ipcomps->ns, 0);
++    {
++        char initial_vlan[10];
++        sprintf(initial_vlan, "%d", cfg->vlanid);
++        ipcomps->vlanEntry = newtEntry(-1, -1, (const char*)initial_vlan, 41, &ipcomps->vlan, 0);
++        memset(initial_vlan, 0x00, 10);
++    }
++    newtGridSetField(egrid, 0, pos, NEWT_GRID_COMPONENT,
++                     newtLabel(-1, -1, _("VLAN id:")),
++                     0, 0, 0, 0, NEWT_ANCHOR_LEFT, 0);
++    newtGridSetField(egrid, 1, pos, NEWT_GRID_COMPONENT,
++                     ipcomps->vlanEntry, 1, 0, 0, 0, NEWT_ANCHOR_LEFT, 0);
++	 
++    pos++;
+ 
+     newtGridSetField(egrid, 0, pos, NEWT_GRID_COMPONENT,
+                      newtLabel(-1, -1, _("Gateway:")),
+@@ -1259,6 +1634,23 @@ int manualNetConfig(char * device, struct networkDeviceConfig * cfg,
+ 
+         /* collect IPv4 data */
+         if (stack[IPV4]) {
++            if (ipcomps->vlan) {
++                fprintf(stderr, "VLANID=%s\n", ipcomps->vlan);
++                int vlanid = atoi(ipcomps->vlan);
++                if (cfg->vlanid != vlanid) {
++                    logMessage(INFO, "New vlanid. Dropping flag (rem old vlanid)");
++                    
++                    down_vlan(cfg);
++                    newCfg->vlanid = vlanid;
++                    cfg->vlanid = vlanid;
++                    cfg->vlaninfo_set = 0;
++                    newCfg->vlaninfo_set = 0;
++                }
++            } else {
++                newCfg->vlanid = 0;
++                cfg->vlanid = 0;
++            }
++            
+             if (ipcomps->ipv4) {
+                 if (inet_pton(AF_INET, ipcomps->ipv4, &addr) >= 1) {
+                     newCfg->dev.ipv4 = ip_addr_in(&addr);
+@@ -1372,6 +1764,41 @@ int manualNetConfig(char * device, struct networkDeviceConfig * cfg,
+     return LOADER_OK;
+ }
+ 
++/*Print pumpNetIntf info
++ */
++void debugPumpIntfInfo(struct pumpNetIntf *dev) {
++    int i;
++    char *buf = NULL;
++
++    logMessage(INFO, "device = %s", dev->device);
++
++    if (dev->set & PUMP_INTFINFO_HAS_IPV4_IP)
++        logMessage(INFO, "ipv4 = %s", ip_text(dev->ipv4, buf, 0));
++
++    if (dev->set & PUMP_INTFINFO_HAS_BROADCAST)
++        logMessage(INFO,"broadcast = %s",ip_text(dev->broadcast,buf,0));
++
++    if (dev->set & PUMP_INTFINFO_HAS_NETMASK)
++        logMessage(INFO, "netmask = %s", ip_text(dev->netmask, buf, 0));
++
++    if (dev->set & PUMP_INTFINFO_HAS_NETWORK)
++        logMessage(INFO, "network = %s", ip_text(dev->network, buf, 0));
++
++    if (dev->set & PUMP_INTFINFO_HAS_IPV6_IP)
++        logMessage(INFO, "ipv6 = %s", ip_text(dev->ipv6, buf, 0));
++
++    if (dev->set & PUMP_INTFINFO_HAS_IPV6_PREFIX)
++        logMessage(INFO, "ipv6_prefixlen = %d", dev->ipv6_prefixlen);
++
++    if (dev->set & PUMP_NETINFO_HAS_GATEWAY)
++        logMessage(INFO, "gateway = %s", ip_text(dev->gateway, buf, 0));
++
++    if (dev->set & PUMP_NETINFO_HAS_DNS)
++        for (i=0; i < dev->numDns; i++)
++            logMessage(INFO, "dns[%d] = %s", i,
++                       ip_text(dev->dnsServers[i], buf, 0));
++}
++
+ void debugNetworkInfo(struct networkDeviceConfig *cfg) {
+     int i;
+     char *buf = NULL;
+@@ -1809,7 +2236,6 @@ int doDhcp(struct networkDeviceConfig *dev) {
+ 
+ int configureNetwork(struct networkDeviceConfig * dev) {
+     int mturet;
+-    char *rc = NULL;
+ 
+     if (!dev->isDynamic) {
+         clearInterface(dev->dev.device);
+@@ -1824,9 +2250,9 @@ int configureNetwork(struct networkDeviceConfig * dev) {
+             }
+         }
+ 
+-        rc = pumpSetupInterface(&dev->dev);
+-        if (rc != NULL) {
+-            logMessage(INFO, "result of pumpSetupInterface is %s", rc);
++        /*Anaconda/libdhcp bug workaround*/
++        if (wrapperPumpSetupInterface(&dev->dev, 0) != 0) {
++            logMessage(ERROR, "Can't configure network");
+             return 1;
+         }
+     }
+@@ -1886,6 +2312,11 @@ int writeNetInfo(const char * fn, struct networkDeviceConfig * dev) {
+           inet_ntop(tip->sa_family, IP_ADDR(tip), ret, IP_STRLEN(tip));
+           fprintf(f, "BROADCAST=%s\n", ret);
+         }
++
++        if (dev->dev.set & dev->vlanid) {
++          inet_ntop(tip->sa_family, IP_ADDR(tip), ret, IP_STRLEN(tip));
++          fprintf(f, "VLANID=%d\n", dev->vlanid);
++        }
+     }
+ 
+     if (dev->dev.set & PUMP_NETINFO_HAS_HOSTNAME)
+@@ -2023,7 +2454,7 @@ void setKickstartNetwork(struct loaderData_s * loaderData, int argc,
+                          char ** argv) {
+     char * arg, * bootProto = NULL, * device = NULL, *ethtool = NULL, * class = NULL;
+     char * essid = NULL, * wepkey = NULL, * onboot = NULL;
+-    int noDns = 0, noksdev = 0, rc, mtu = 0, noipv4 = 0, noipv6 = 0, dhcpTimeout = -1;
++    int noDns = 0, noksdev = 0, rc, mtu = 0, noipv4 = 0, noipv6 = 0, dhcpTimeout = -1, vlanid = -1;
+     poptContext optCon;
+ 
+     struct poptOption ksOptions[] = {
+@@ -2045,6 +2476,7 @@ void setKickstartNetwork(struct loaderData_s * loaderData, int argc,
+         { "onboot", '\0', POPT_ARG_STRING, &onboot, 0, NULL, NULL },
+         { "notksdevice", '\0', POPT_ARG_NONE, &noksdev, 0, NULL, NULL },
+         { "dhcptimeout", '\0', POPT_ARG_INT, &dhcpTimeout, 0, NULL, NULL },
++		{ "vlanid", '\0', POPT_ARG_INT, &vlanid, 0, NULL, NULL },
+         { 0, 0, 0, 0, 0, 0, 0 }
+     };
+ 
+@@ -2142,6 +2574,10 @@ void setKickstartNetwork(struct loaderData_s * loaderData, int argc,
+            loaderData->mtu = mtu;
+         }
+ 
++		if (vlanid > 0) {
++			loaderData->vlanid = vlanid;
++		}
++		
+         if (noipv4)
+             flags |= LOADER_FLAGS_NOIPV4;
+ 
+@@ -2488,20 +2924,43 @@ int kickstartNetworkUp(struct loaderData_s * loaderData,
+         rc = readNetConfig(loaderData->netDev, netCfgPtr, loaderData->netCls,
+                            loaderData->method, query);
+ 
++        loaderData->vlanid = netCfgPtr->vlanid;
++        loaderData->vlaninfo_set = netCfgPtr->vlaninfo_set;
++        
+         if (rc == LOADER_ERROR) {
+             logMessage(ERROR, "unable to setup networking");
++
++            down_vlan(netCfgPtr);
++            loaderData->vlaninfo_set = 0;
++            
+             return -1;
+         }
+         else if (rc == LOADER_BACK) {
+             /* Going back to the interface selection screen, so unset anything
+              * we set before attempting to bring the incorrect interface up.
+              */
++
++            down_vlan(netCfgPtr);
++            
+             loaderData->netDev_set = 0;
+             free(loaderData->ip);
+             loaderData->ipinfo_set = 0;
++            loaderData->vlaninfo_set = 0;
++
++            logMessage(INFO, "KICKSTART Loader back");
++            /*We may have endless readNetConfig call here.
++             */
++            return -1;
+         }
+-        else
++        else {
++            if (loaderData->vlanid > 0 &&
++                loaderData->vlaninfo_set == 0) {
++                /*hack*/
++                load_vlan_module(loaderData);
++                up_vlan(netCfgPtr);
++            }
+             break;
++        }
+     } while (1);
+ 
+     /* Store all information for possible subsequent calls (#495042) */
+diff --git a/loader2/net.h b/loader2/net.h
+index 1957837..8b90dbe 100644
+--- a/loader2/net.h
++++ b/loader2/net.h
+@@ -26,6 +26,8 @@ struct networkDeviceConfig {
+     char * essid;
+     char * wepkey;
+ 
++	int vlanid;
++    int vlaninfo_set;
+     /* misc settings */
+     int isDynamic;
+     int isiBFT;
+@@ -43,10 +45,10 @@ struct networkDeviceConfig {
+ struct intfconfig_s {
+     newtComponent ipv4Entry, cidr4Entry;
+     newtComponent ipv6Entry, cidr6Entry;
+-    newtComponent gwEntry, nsEntry;
++    newtComponent gwEntry, nsEntry, vlanEntry;
+     const char *ipv4, *cidr4;
+     const char *ipv6, *cidr6;
+-    const char *gw, *ns;
++    const char *gw, *ns, *vlan;
+ };
+ 
+ struct netconfopts {
+@@ -89,4 +91,14 @@ int doDhcp(struct networkDeviceConfig *dev);
+ void netlogger(void *arg, int priority, char *fmt, va_list va);
+ void splitHostname (char *str, char **host, char **port);
+ 
++void debugPumpIntfInfo(struct pumpNetIntf *dev);
++int dev_vid_ioctl(int sock, int flag, char * ifname, int vlanid);
++int dev_addgateway_ioctl(int sock, int flag, const char *if_name,
++                         ip_addr_t *addr_dst,
++                         ip_addr_t *addr_gmask);
++int wrapperPumpSetupInterface(struct pumpNetIntf *dev, int sock);
++
++int up_vlan(struct networkDeviceConfig *netDev);
++int down_vlan(struct networkDeviceConfig *netDev);
++
+ #endif
